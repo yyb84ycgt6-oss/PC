@@ -1,0 +1,10 @@
+{
+  "name": "jackie-playground",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node server.js",
+    "build": "node -e \"console.log('Jackie Playground is ready for static hosting')\""
+  }
+}
