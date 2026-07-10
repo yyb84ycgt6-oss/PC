@@ -11,6 +11,14 @@ const energyNames = ["quiet", "tender", "steady", "open", "charged"];
 energy.addEventListener("input", () => { energyValue.textContent = energyNames[energy.value - 1]; });
 $("menu").addEventListener("click", () => $("sidebar").classList.add("open"));
 $("closeDrawer").addEventListener("click", () => $("sidebar").classList.remove("open"));
+$("collapse").addEventListener("click", () => $("sidebar").classList.toggle("collapsed"));
+$("enterPlayground").addEventListener("click", event => {
+  event.stopPropagation();
+  $("landing").classList.add("hidden");
+  setTimeout(() => $("landing").remove(), 550);
+  input.focus();
+});
+$("landing").addEventListener("click", () => $("enterPlayground").click());
 $("newThread").addEventListener("click", () => { chat.replaceChildren(); welcome.hidden = false; input.focus(); });
 input.addEventListener("keydown", event => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") form.requestSubmit(); });
 
@@ -63,5 +71,6 @@ form.addEventListener("submit", async event => {
   const bubble = addBubble("Thinking <span></span><span></span><span></span>", "jackie");
   bubble.classList.add("thinking");
   await answer(message, bubble);
+  $("frameStatus").textContent = "— PRESENT";
   $("synchLog").innerHTML = `Synchronicity log <span>·</span> thread gently added`;
 });
