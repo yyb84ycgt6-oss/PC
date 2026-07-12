@@ -1,0 +1,8 @@
+{
+  "name": "‾_o_‾",
+  "description": "Virtual developer OS with pen-based ink gestures, email summarization, a 60+ model hybrid AI compute registry, ResearchRabbit paper visualizations, and a live simulation pipeline for advanced Agentic frameworks.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
