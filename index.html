@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Jackie Playground — a calm space for clear thinking." />
+    <title>Jackie Playground</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="landing" id="landing" role="dialog" aria-label="Enter Jackie Playground">
+      <div class="landing-inner">
+        <svg class="landing-prism" viewBox="0 0 60 60" aria-hidden="true"><defs><linearGradient id="landingGradient" x1="0%" y1="100%" x2="100%" y2="0%"><stop stop-color="#7ec8b4"/><stop offset=".5" stop-color="#d4c66a"/><stop offset="1" stop-color="#e89c6c"/></linearGradient></defs><polygon points="30,6 5,53 55,53" fill="url(#landingGradient)"/></svg>
+        <p class="landing-label">Jackie Playground</p>
+        <h1 class="landing-title">A place for <em>clearer</em> thinking.</h1>
+        <div class="landing-bar"><span></span></div>
+        <div class="landing-meta"><span>Preparing conversation</span><span>Ready</span></div>
+        <button class="landing-enter" id="enterPlayground">Enter quietly</button>
+      </div>
+    </div>
+    <div class="prism prism-a"></div><div class="prism prism-b"></div>
+    <div class="app-shell">
+      <aside class="sidebar" id="sidebar">
+        <div class="brand"><span class="brand-mark">✦</span><span>Jackie</span></div>
+        <button class="new-thread" id="newThread">＋ New thread</button>
+        <p class="eyebrow">Conversations</p>
+        <nav class="thread-list" id="threadList" aria-label="Conversations">
+          <button class="thread active">A gentler way forward</button>
+          <button class="thread">Ideas in orbit</button>
+        </nav>
+        <div class="sidebar-foot"><div class="status-dot"></div><span>Jackie is present</span><button id="closeDrawer" aria-label="Close menu">×</button></div>
+      </aside>
+      <main class="main">
+        <header class="topbar"><button class="icon-button menu" id="menu" aria-label="Open menu">☰</button><button class="collapse-button" id="collapse" aria-label="Collapse sidebar">‹</button><span class="top-label">Jackie <i>·</i> Synchronicity 01</span><button class="icon-button" id="focus" aria-label="Focus mode">◌</button></header>
+        <section class="welcome" id="welcome"><p class="eyebrow">A quiet place to begin</p><h1>What is asking<br /><em>to be understood?</em></h1><p class="intro">Bring the unfinished thought, the small question, or the big feeling. We’ll find its shape together.</p></section>
+        <section class="chat-frame"><div class="frame-bar"><span class="frame-dots"><i></i><i></i><i></i></span><strong>THE JACKIE PLAYGROUND</strong><span id="frameStatus">— READY</span></div><section class="chat" id="chat" aria-live="polite"></section></section>
+        <form class="composer" id="composer">
+          <div class="energy"><label for="energy">Your energy</label><input id="energy" type="range" min="1" max="5" value="3" /><span id="energyValue">steady</span></div>
+          <textarea id="message" rows="2" placeholder="Write what’s on your mind…" aria-label="Message Jackie"></textarea>
+          <div class="compose-foot"><span class="hint">⌘ ↵ to send · Jackie remembers your purpose, not your secrets.</span><button class="send" type="submit" aria-label="Send message">↗</button></div>
+        </form>
+        <p class="synch-log" id="synchLog">Synchronicity log <span>·</span> ready for a new thread</p>
+      </main>
+    </div>
+    <script type="module" src="/src/app.js"></script>
+  </body>
+</html>
