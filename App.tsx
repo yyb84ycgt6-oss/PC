@@ -57,6 +57,7 @@ import { BotStudioApp } from './components/apps/BotStudioApp';
 import { QpdbApp } from './components/apps/QpdbApp';
 import { MultiAgentConsensusLab } from './components/apps/MultiAgentConsensusLab';
 import { CyberSecurityRulebookApp } from './components/apps/CyberSecurityRulebookApp';
+import { GlobalTerminal } from './components/GlobalTerminal';
 import { saveGlobalState, loadGlobalState } from './lib/persist';
 
 const INITIAL_DESKTOP_ITEMS: DesktopItem[] = [
@@ -915,6 +916,11 @@ Body: ${emailToSummarize.body}`,
                 })}
 
                 <InkLayer active={inkMode} strokes={strokes} setStrokes={setStrokes} isProcessing={isProcessing} />
+
+                {/* Global Terminal - Always Available */}
+                <GlobalTerminal onStateChange={(isActive) => {
+                    showToast(isActive ? '✓ Global Terminal Activated' : '✗ Global Terminal Deactivated', isActive ? 'Terminal' : 'Info', true);
+                }} />
 
                 {toast && (
                     // Notification Card
