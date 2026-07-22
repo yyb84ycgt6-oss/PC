@@ -2,22 +2,24 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
     Cpu, Send, Plus, Trash2, Cloud, HardDrive, Loader2, Zap, Activity,
     MessageSquare, ChevronRight, RefreshCw, Wrench, Circle, Scissors,
-    Shield, Save, Search, AlertTriangle, Archive, Settings, Rocket, X
+    Shield, Save, Search, AlertTriangle, Archive, Settings, Rocket, X, Sparkles
 } from 'lucide-react';
+import { Type } from '@google/genai';
 import { getAiClient, MODEL_NAME } from '../../lib/gemini';
 
 /**
- * FUSION — Phase 3
+ * FUSION — Phase 4
  * "One brain, many hands." A single conversational surface that routes to a
  * local brain (Ollama hardware) first and falls back to the cloud (Gemini)
  * automatically. Three calm zones: Memory · Conversation · Live Canvas.
  *
- * Phase 1: the shell, one real routed chat, the unified vault.
- * Phase 2: the tool bus — compress / scan_threat / save_to_vault / recall.
- * Phase 3 (this): reach beyond the window —
- *   • send_telegram — real /api/telegram/send integration
- *   • run_task      — genuine fire-and-forget background job with a live queue
- *   • Settings      — configure the local endpoint/model and Telegram chat ID
+ * Phase 1: shell + one real routed chat + unified vault.
+ * Phase 2: tool bus — compress / scan_threat / save_to_vault / recall.
+ * Phase 3: reach beyond the window — send_telegram + background run_task + settings.
+ * Phase 4 (this): AUTONOMOUS INVOKE — with Auto on (cloud route), the model
+ *   decides for itself when to call a tool via Gemini function-calling. Every
+ *   call is announced in the chat and rendered in the canvas, so the machine's
+ *   choices stay visible and human-comprehensible.
  */
 
 type Brain = 'local' | 'cloud';
@@ -53,6 +55,7 @@ interface FVault {
     artifacts: VaultArtifact[];
     activeId: string | null;
     preferLocal: boolean;
+    autoTools: boolean;
     ollamaEndpoint: string;
     ollamaModel: string;
     telegramChatId: string;
@@ -70,7 +73,19 @@ interface TaskItem {
 
 const VAULT_KEY = 'fusion_vault_v1';
 
-const SYSTEM_PROMPT = `You are the unified intelligence of a local-first developer OS — one mind speaking for the whole machine. You are direct, warm, and technically deep with zero fluff. Lead with the answer; add depth only when it earns its place, so a human is never overwhelmed. You are offline-first and privacy-respecting. You have real tools on your bus: compress (squeeze text), scan_threat (audit a message for scams/phishing), save_to_vault (remember something), recall (search memory), send_telegram (message the user's real chat), run_task (dispatch a background job). When a request maps to a tool, tell the user which one fits and that they can run it from the tool chips or a /command. Keep the human oriented at all times.`;
+const SYSTEM_PROMPT = `You are the unified intelligence of a local-first developer OS — one mind speaking for the whole machine. You are direct, warm, and technically deep with zero fluff. Lead with the answer; add depth only when it earns its place, so a human is never overwhelmed. You are offline-first and privacy-respecting. You have real tools on your bus: compress, scan_threat, save_to_vault, recall, send_telegram, run_task. When a request clearly maps to a tool, call it; otherwise just answer. Only send_telegram when the user explicitly asks to message Telegram. Keep the human oriented at all times.`;
+
+// Gemini function-calling declarations (Phase 4 — cloud route only).
+const FUSION_TOOLS = [{
+    functionDeclarations: [
+        { name: 'compress', description: 'Compress/condense text to its core meaning, stripping filler. Use when the user asks to summarize, condense, shorten, or squeeze text.', parameters: { type: Type.OBJECT, required: ['text'], properties: { text: { type: Type.STRING, description: 'The text to compress' } } } },
+        { name: 'scan_threat', description: 'Audit a message for scams, phishing, or social engineering. Use when the user asks whether a message is a scam, safe, or legit.', parameters: { type: Type.OBJECT, required: ['text'], properties: { text: { type: Type.STRING, description: 'The suspicious message to scan' } } } },
+        { name: 'save_to_vault', description: 'Save a note or snippet to the persistent vault memory. Use when the user says remember/save/note this.', parameters: { type: Type.OBJECT, required: ['text'], properties: { text: { type: Type.STRING, description: 'The content to save' } } } },
+        { name: 'recall', description: 'Search the vault memory for saved items. Use when the user asks what they saved, or to recall/find something in memory.', parameters: { type: Type.OBJECT, properties: { query: { type: Type.STRING, description: 'Search query; empty for recent items' } } } },
+        { name: 'send_telegram', description: "Send a message to the user's real Telegram chat. Use ONLY when the user explicitly asks to send/text/message something to Telegram.", parameters: { type: Type.OBJECT, required: ['text'], properties: { text: { type: Type.STRING, description: 'The message text to send' } } } },
+        { name: 'run_task', description: 'Dispatch a longer task to run in the background without blocking the chat. Use for multi-step generation the user wants to fire off.', parameters: { type: Type.OBJECT, required: ['prompt'], properties: { prompt: { type: Type.STRING, description: 'The task instruction' } } } },
+    ],
+}];
 
 const SCAM_PATTERNS = [
     { name: 'Urgency Trap', indicators: ['act now', 'limited time', 'urgent', 'only today', 'expires'], context: 'Artificial time pressure bypasses rational analysis' },
@@ -119,6 +134,7 @@ const defaultVault = (): FVault => {
         artifacts: [],
         activeId: c.id,
         preferLocal: false,
+        autoTools: false,
         ollamaEndpoint: 'http://localhost:11434',
         ollamaModel: 'llama3.2',
         telegramChatId: '',
@@ -189,7 +205,6 @@ export const FusionApp: React.FC = () => {
         }));
     }, [patchConv]);
 
-    // convenience: push to the currently active conversation
     const pushMsg = useCallback((m: FMessage) => {
         if (active) pushMsgTo(active.id, m);
     }, [active, pushMsgTo]);
@@ -211,14 +226,16 @@ export const FusionApp: React.FC = () => {
         });
     };
     const setPreferLocal = (preferLocal: boolean) => setVault(v => ({ ...v, preferLocal }));
+    const toggleAuto = () => setVault(v => ({ ...v, autoTools: !v.autoTools }));
     const addArtifact = (a: VaultArtifact) => setVault(v => ({ ...v, artifacts: [a, ...v.artifacts].slice(0, 200) }));
 
     // --- model calls ---------------------------------------------------------
+    const historyToContents = (history: FMessage[]) =>
+        `${SYSTEM_PROMPT}\n\n` + history.map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`).join('\n') + `\nAssistant:`;
+
     const callCloud = async (history: FMessage[]): Promise<string> => {
         const ai = getAiClient();
-        const contents = `${SYSTEM_PROMPT}\n\n` +
-            history.map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`).join('\n') + `\nAssistant:`;
-        const response = await ai.models.generateContent({ model: MODEL_NAME, contents, config: { temperature: 0.7 } });
+        const response = await ai.models.generateContent({ model: MODEL_NAME, contents: historyToContents(history), config: { temperature: 0.7 } });
         const text = (response.text || '').trim();
         if (!text) throw new Error('Empty cloud response');
         return text;
@@ -234,7 +251,6 @@ export const FusionApp: React.FC = () => {
         return String(data.response).trim();
     };
 
-    // single-prompt model call used by tools & tasks (route-aware, local-first w/ fallback)
     const askModel = async (prompt: string, temperature = 0.2): Promise<{ text: string; brain: Brain }> => {
         if (vault.preferLocal) {
             try {
@@ -251,28 +267,19 @@ export const FusionApp: React.FC = () => {
         return { text: (r.text || '').trim(), brain: 'cloud' };
     };
 
-    // --- TOOLS ---------------------------------------------------------------
-    const runCompress = async (text: string) => {
-        if (!text.trim() || toolBusy || busy) return;
-        pushMsg({ role: 'user', content: text, tool: 'compress', ts: Date.now() });
-        setToolBusy('compress');
-        try {
-            const { text: out } = await askModel(COMPRESS_PROMPT(text), 0.15);
-            const inChars = text.length, outChars = out.length;
-            const ratioPct = inChars > 0 ? Math.max(0, Math.round(((inChars - outChars) / inChars) * 100)) : 0;
-            setToolResult({ tool: 'compress', inChars, outChars, ratioPct, text: out, ts: Date.now() });
-            addArtifact({ id: `a_${Date.now()}`, kind: 'compression', title: text.slice(0, 40), content: out, createdAt: Date.now() });
-            pushMsg({ role: 'assistant', content: `Compressed ${inChars.toLocaleString()} → ${outChars.toLocaleString()} chars (−${ratioPct}% noise). Result in the canvas → and saved to your vault.`, tool: 'compress', ts: Date.now() });
-        } catch (err: any) {
-            pushMsg({ role: 'assistant', content: `⚠️ Compress failed: ${err?.message || 'unknown error'}.`, error: true, tool: 'compress', ts: Date.now() });
-        } finally { setToolBusy(null); }
+    // --- TOOL EXECUTORS (pure side-effects; return a one-line summary) --------
+    const execCompress = async (text: string): Promise<string> => {
+        if (!text.trim()) return 'No text was provided to compress.';
+        const { text: out } = await askModel(COMPRESS_PROMPT(text), 0.15);
+        const inChars = text.length, outChars = out.length;
+        const ratioPct = inChars > 0 ? Math.max(0, Math.round(((inChars - outChars) / inChars) * 100)) : 0;
+        setToolResult({ tool: 'compress', inChars, outChars, ratioPct, text: out, ts: Date.now() });
+        addArtifact({ id: `a_${Date.now()}`, kind: 'compression', title: text.slice(0, 40), content: out, createdAt: Date.now() });
+        return `Compressed ${inChars.toLocaleString()} → ${outChars.toLocaleString()} chars (−${ratioPct}%).`;
     };
 
-    const runScan = async (text: string) => {
-        if (!text.trim() || toolBusy || busy) return;
-        pushMsg({ role: 'user', content: text, tool: 'scan_threat', ts: Date.now() });
-        setToolBusy('scan_threat');
-
+    const execScan = async (text: string): Promise<string> => {
+        if (!text.trim()) return 'No message was provided to scan.';
         const low = text.toLowerCase();
         const hits: { name: string; context: string }[] = [];
         let score = 0;
@@ -283,7 +290,6 @@ export const FusionApp: React.FC = () => {
         let level = score > 5 ? 'EXTREME' : score > 3 ? 'HIGH' : score > 1 ? 'MEDIUM' : 'LOW';
         let rationale = 'On-board pattern matching flagged the vectors above.';
         let countermeasures = ['Do not reply or click any links.', 'Verify the sender through an independent channel.'];
-
         try {
             const { text: out } = await askModel(SCAN_PROMPT(text), 0.1);
             const jsonMatch = out.match(/\{[\s\S]*\}/);
@@ -294,45 +300,30 @@ export const FusionApp: React.FC = () => {
                 if (Array.isArray(parsed.countermeasures) && parsed.countermeasures.length) countermeasures = parsed.countermeasures;
             }
         } catch { /* keep local-only result */ }
-
         const scoreStr = (level === 'EXTREME' ? Math.max(score, 8.5) : level === 'HIGH' ? Math.max(score, 6) : level === 'MEDIUM' ? Math.max(score, 3) : Math.max(score, 0.5)).toFixed(1);
         setToolResult({ tool: 'scan', level, score: scoreStr, hits: hits.length ? hits : [{ name: 'No known pattern matched', context: 'Model judgement only — stay alert.' }], rationale, countermeasures, ts: Date.now() });
         addArtifact({ id: `a_${Date.now()}`, kind: 'scan', title: `Scan: ${text.slice(0, 32)}`, content: `${level} (${scoreStr}/10) — ${rationale}`, createdAt: Date.now() });
-        pushMsg({ role: 'assistant', content: `Threat scan complete: ${level} risk (${scoreStr}/10). ${rationale} Full report in the canvas →`, tool: 'scan_threat', ts: Date.now() });
-        setToolBusy(null);
+        return `Threat level ${level} (${scoreStr}/10). ${rationale}`;
     };
 
-    const runSave = (text: string) => {
-        if (!text.trim() || toolBusy || busy) return;
+    const execSave = (text: string): string => {
+        if (!text.trim()) return 'Nothing to save.';
         const art: VaultArtifact = { id: `a_${Date.now()}`, kind: 'note', title: text.slice(0, 42), content: text, createdAt: Date.now() };
         addArtifact(art);
-        pushMsg({ role: 'user', content: text, tool: 'save_to_vault', ts: Date.now() });
         setToolResult({ tool: 'vault', action: 'saved', entries: [art], ts: Date.now() });
-        pushMsg({ role: 'assistant', content: `Saved to your vault as "${art.title}". Recall it anytime with /recall.`, tool: 'save_to_vault', ts: Date.now() });
+        return `Saved "${art.title}" to the vault.`;
     };
 
-    const runRecall = (query: string) => {
-        if (toolBusy || busy) return;
+    const execRecall = (query: string): string => {
         const q = query.trim().toLowerCase();
-        const entries = q
-            ? vault.artifacts.filter(a => a.title.toLowerCase().includes(q) || a.content.toLowerCase().includes(q))
-            : vault.artifacts.slice(0, 10);
-        pushMsg({ role: 'user', content: query || '(all recent)', tool: 'recall', ts: Date.now() });
+        const entries = q ? vault.artifacts.filter(a => a.title.toLowerCase().includes(q) || a.content.toLowerCase().includes(q)) : vault.artifacts.slice(0, 10);
         setToolResult({ tool: 'vault', action: 'search', entries, query, ts: Date.now() });
-        pushMsg({ role: 'assistant', content: entries.length ? `Recalled ${entries.length} vault ${entries.length === 1 ? 'entry' : 'entries'} → canvas.` : `Nothing in the vault matches "${query}" yet.`, tool: 'recall', ts: Date.now() });
+        return entries.length ? `Found ${entries.length} vault ${entries.length === 1 ? 'entry' : 'entries'}.` : `No vault entries match "${query}".`;
     };
 
-    // send_telegram — real /api/telegram/send integration
-    const runTelegram = async (text: string) => {
-        if (!text.trim() || toolBusy || busy) return;
-        if (!vault.telegramChatId.trim()) {
-            pushMsg({ role: 'user', content: text, tool: 'send_telegram', ts: Date.now() });
-            pushMsg({ role: 'assistant', content: 'No Telegram chat ID set yet. Open Settings (gear, top-right) and add your chat ID — then I can deliver messages to your real chat.', error: true, tool: 'send_telegram', ts: Date.now() });
-            setShowSettings(true);
-            return;
-        }
-        pushMsg({ role: 'user', content: text, tool: 'send_telegram', ts: Date.now() });
-        setToolBusy('send_telegram');
+    const execTelegram = async (text: string): Promise<string> => {
+        if (!text.trim()) return 'No message text to send.';
+        if (!vault.telegramChatId.trim()) { setShowSettings(true); return 'No Telegram chat ID is configured — Settings opened for the user to add it.'; }
         try {
             const res = await fetch('/api/telegram/send', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -343,25 +334,18 @@ export const FusionApp: React.FC = () => {
             const detail = ok ? 'Delivered' : (data.description || data.error || `HTTP ${res.status}`);
             setToolResult({ tool: 'telegram', ok, detail, text, ts: Date.now() });
             if (ok) addArtifact({ id: `a_${Date.now()}`, kind: 'telegram', title: `Telegram: ${text.slice(0, 32)}`, content: text, createdAt: Date.now() });
-            pushMsg({ role: 'assistant', content: ok ? `Sent to your Telegram ✓` : `⚠️ Telegram send failed: ${detail}. (The bot token is set server-side via TELEGRAM_BOT_TOKEN.)`, error: !ok, tool: 'send_telegram', ts: Date.now() });
+            return ok ? 'Message delivered to Telegram.' : `Telegram send failed: ${detail}.`;
         } catch (err: any) {
             setToolResult({ tool: 'telegram', ok: false, detail: err?.message || 'network error', text, ts: Date.now() });
-            pushMsg({ role: 'assistant', content: `⚠️ Telegram send failed: ${err?.message || 'network error'}.`, error: true, tool: 'send_telegram', ts: Date.now() });
-        } finally { setToolBusy(null); }
+            return `Telegram send failed: ${err?.message || 'network error'}.`;
+        }
     };
 
-    // run_task — genuine fire-and-forget background job (does NOT block the chat)
-    const runTask = (prompt: string) => {
-        if (!prompt.trim() || busy) return;
-        const convId = active?.id;
-        if (!convId) return;
+    const execTask = (prompt: string, convId: string): string => {
+        if (!prompt.trim()) return 'No task instruction provided.';
         const id = `t_${Date.now()}_${Math.floor(Math.random() * 999)}`;
         const startTs = Date.now();
         setTasks(prev => [{ id, prompt, status: 'running', startTs }, ...prev].slice(0, 20));
-        pushMsgTo(convId, { role: 'user', content: prompt, tool: 'run_task', ts: Date.now() });
-        pushMsgTo(convId, { role: 'assistant', content: `Task dispatched to the background (#${id.slice(-4)}). Keep working — I'll drop the result here when it lands.`, tool: 'run_task', ts: Date.now() });
-
-        // fire and forget — the chat stays fully usable while this runs
         askModel(TASK_PROMPT(prompt), 0.5)
             .then(({ text: out, brain }) => {
                 const endTs = Date.now();
@@ -372,29 +356,92 @@ export const FusionApp: React.FC = () => {
                 pushMsgTo(convId, { role: 'assistant', content: `✅ Task #${id.slice(-4)} complete (${elapsedS}s · ${brain}):\n\n${out}`, tool: 'run_task', ts: Date.now() });
             })
             .catch((err: any) => {
-                const endTs = Date.now();
-                setTasks(prev => prev.map(t => t.id === id ? { ...t, status: 'failed', endTs, error: String(err?.message || err) } : t));
+                setTasks(prev => prev.map(t => t.id === id ? { ...t, status: 'failed', endTs: Date.now(), error: String(err?.message || err) } : t));
                 pushMsgTo(convId, { role: 'assistant', content: `⚠️ Task #${id.slice(-4)} failed: ${err?.message || 'unknown error'}.`, error: true, tool: 'run_task', ts: Date.now() });
             });
+        return `Task #${id.slice(-4)} dispatched to the background.`;
     };
 
-    const dispatchTool = (tool: string, text: string) => {
-        if (tool === 'compress') runCompress(text);
-        else if (tool === 'scan') runScan(text);
-        else if (tool === 'save') runSave(text);
-        else if (tool === 'recall') runRecall(text);
-        else if (tool === 'telegram') runTelegram(text);
-        else if (tool === 'task') runTask(text);
+    const dispatchExec = async (name: string, args: any, convId: string): Promise<string> => {
+        switch (name) {
+            case 'compress': return await execCompress(String(args?.text || ''));
+            case 'scan_threat': return await execScan(String(args?.text || ''));
+            case 'save_to_vault': return execSave(String(args?.text || ''));
+            case 'recall': return execRecall(String(args?.query || ''));
+            case 'send_telegram': return await execTelegram(String(args?.text || ''));
+            case 'run_task': return execTask(String(args?.prompt || ''), convId);
+            default: return `Unknown tool: ${name}`;
+        }
     };
 
-    const runToolFromInput = (tool: string) => {
+    // --- chip / slash tool wrappers (explicit invocation) --------------------
+    const runChipTool = async (tool: string, text: string, busyKey: string) => {
+        if (busy || toolBusy) return;
+        const convId = active?.id || '';
+        pushMsg({ role: 'user', content: text || '(all recent)', tool: busyKey, ts: Date.now() });
+        // run_task is fire-and-forget; others show the busy state
+        if (tool === 'run_task') {
+            const summary = execTask(text, convId);
+            pushMsg({ role: 'assistant', content: `${summary} Keep working — I'll drop the result here when it lands.`, tool: busyKey, ts: Date.now() });
+            return;
+        }
+        setToolBusy(busyKey);
+        try {
+            const summary = await dispatchExec(tool, tool === 'recall' ? { query: text } : tool === 'run_task' ? { prompt: text } : { text }, convId);
+            pushMsg({ role: 'assistant', content: `${summary} Result in the canvas →`, tool: busyKey, ts: Date.now() });
+        } catch (err: any) {
+            pushMsg({ role: 'assistant', content: `⚠️ ${tool} failed: ${err?.message || 'unknown error'}.`, error: true, tool: busyKey, ts: Date.now() });
+        } finally { setToolBusy(null); }
+    };
+
+    const CHIP_MAP: Record<string, { tool: string; busyKey: string }> = {
+        compress: { tool: 'compress', busyKey: 'compress' },
+        scan: { tool: 'scan_threat', busyKey: 'scan_threat' },
+        save: { tool: 'save_to_vault', busyKey: 'save_to_vault' },
+        recall: { tool: 'recall', busyKey: 'recall' },
+        telegram: { tool: 'send_telegram', busyKey: 'send_telegram' },
+        task: { tool: 'run_task', busyKey: 'run_task' },
+    };
+
+    const runToolFromInput = (chip: string) => {
         const text = input.trim();
-        if (!text && tool !== 'recall') { setRoute(r => ({ ...r, note: 'Type text in the box first, then pick a tool.' })); return; }
+        if (!text && chip !== 'recall') { setRoute(r => ({ ...r, note: 'Type text in the box first, then pick a tool.' })); return; }
         setInput('');
-        dispatchTool(tool, text);
+        const m = CHIP_MAP[chip];
+        runChipTool(m.tool, text, m.busyKey);
     };
 
-    // --- chat send (with /slash tool routing) --------------------------------
+    // --- autonomous cloud turn (Phase 4) -------------------------------------
+    const sendAuto = async (history: FMessage[], convId: string) => {
+        const ai = getAiClient();
+        const response = await ai.models.generateContent({ model: MODEL_NAME, contents: historyToContents(history), config: { temperature: 0.7, tools: FUSION_TOOLS } });
+        const calls: any[] = response.functionCalls || [];
+
+        if (calls.length) {
+            const results: string[] = [];
+            for (const fc of calls) {
+                pushMsgTo(convId, { role: 'assistant', content: `Reaching for ${fc.name}…`, tool: fc.name, ts: Date.now() });
+                const summary = await dispatchExec(fc.name, fc.args || {}, convId);
+                results.push(`${fc.name}: ${summary}`);
+            }
+            // brief natural-language wrap-up that references what the tools found
+            let finalText = '';
+            try {
+                const followContents = `${SYSTEM_PROMPT}\n\n${history.map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`).join('\n')}\n\n[You autonomously invoked tools. Results:]\n${results.join('\n')}\n\nGive the user a brief, warm final answer referencing what happened. Do not repeat raw tool output verbatim.`;
+                const f = await ai.models.generateContent({ model: MODEL_NAME, contents: followContents, config: { temperature: 0.7 } });
+                finalText = (f.text || '').trim();
+            } catch { /* summaries already posted */ }
+            if (finalText) pushMsgTo(convId, { role: 'assistant', content: finalText, brain: 'cloud', ts: Date.now() });
+            setRoute({ brain: 'cloud', fellBack: false, latencyMs: null, chars: finalText.length || null, note: `Auto: invoked ${calls.length} tool${calls.length > 1 ? 's' : ''}.` });
+            return;
+        }
+
+        const text = (response.text || '').trim() || 'No response.';
+        pushMsgTo(convId, { role: 'assistant', content: text, brain: 'cloud', ts: Date.now() });
+        setRoute({ brain: 'cloud', fellBack: false, latencyMs: null, chars: text.length, note: 'Auto: answered directly (no tool needed).' });
+    };
+
+    // --- chat send -----------------------------------------------------------
     const send = async () => {
         const raw = input.trim();
         if (!raw || busy || toolBusy) return;
@@ -405,40 +452,48 @@ export const FusionApp: React.FC = () => {
             const arg = slash[2].trim();
             if (cmd !== 'recall' && !arg) { setRoute(r => ({ ...r, note: `/${cmd} needs text after it.` })); return; }
             setInput('');
-            dispatchTool(cmd, arg);
+            const m = CHIP_MAP[cmd];
+            runChipTool(m.tool, arg, m.busyKey);
             return;
         }
 
         const userMsg: FMessage = { role: 'user', content: raw, ts: Date.now() };
+        const convId = active?.id || '';
         const historyForModel = [...(active?.messages || []), userMsg];
         pushMsg(userMsg);
         setInput('');
         setBusy(true);
-        setStatus('routing');
-        setRoute(r => ({ ...r, note: vault.preferLocal ? 'Reaching for local brain…' : 'Routing to cloud…' }));
+        setStatus('thinking');
+        const useAuto = vault.autoTools && !vault.preferLocal;
+        setRoute(r => ({ ...r, note: useAuto ? 'Auto: deciding whether to use a tool…' : vault.preferLocal ? 'Reaching for local brain…' : 'Routing to cloud…' }));
 
         const t0 = performance.now();
-        let replyText = '', brain: Brain = 'cloud', fellBack = false;
         try {
-            setStatus('thinking');
-            if (vault.preferLocal) {
-                try { replyText = await callLocal(historyForModel); brain = 'local'; }
-                catch { fellBack = true; setRoute(r => ({ ...r, note: 'Local unavailable → falling back to cloud.' })); replyText = await callCloud(historyForModel); brain = 'cloud'; }
-            } else { replyText = await callCloud(historyForModel); brain = 'cloud'; }
-
-            const latencyMs = Math.round(performance.now() - t0);
-            pushMsg({ role: 'assistant', content: replyText, brain, fellBack, ts: Date.now() });
-            setRoute({ brain, fellBack, latencyMs, chars: replyText.length, note: fellBack ? 'Answered by cloud after local fallback.' : brain === 'local' ? 'Answered by local hardware.' : 'Answered by cloud.' });
+            if (useAuto) {
+                await sendAuto(historyForModel, convId);
+            } else {
+                let replyText = '', brain: Brain = 'cloud', fellBack = false;
+                if (vault.preferLocal) {
+                    try { replyText = await callLocal(historyForModel); brain = 'local'; }
+                    catch { fellBack = true; setRoute(r => ({ ...r, note: 'Local unavailable → falling back to cloud.' })); replyText = await callCloud(historyForModel); brain = 'cloud'; }
+                } else { replyText = await callCloud(historyForModel); brain = 'cloud'; }
+                pushMsgTo(convId, { role: 'assistant', content: replyText, brain, fellBack, ts: Date.now() });
+                setRoute({ brain, fellBack, latencyMs: null, chars: replyText.length, note: fellBack ? 'Answered by cloud after local fallback.' : brain === 'local' ? 'Answered by local hardware.' : 'Answered by cloud.' });
+            }
         } catch (err: any) {
+            pushMsgTo(convId, { role: 'assistant', content: `⚠️ Both brains are unreachable right now. ${err?.message || 'Unknown routing error.'}\n\nCheck that the dev server is running, and that GEMINI_API_KEY (cloud) or OLLAMA_ENDPOINT (local) is configured.`, error: true, ts: Date.now() });
+            setRoute({ brain: null, fellBack: false, latencyMs: null, chars: null, note: 'Routing failed — no brain answered.' });
+        } finally {
+            setBusy(false); setStatus('idle');
             const latencyMs = Math.round(performance.now() - t0);
-            pushMsg({ role: 'assistant', content: `⚠️ Both brains are unreachable right now. ${err?.message || 'Unknown routing error.'}\n\nCheck that the dev server is running, and that GEMINI_API_KEY (cloud) or OLLAMA_ENDPOINT (local) is configured.`, error: true, ts: Date.now() });
-            setRoute({ brain: null, fellBack, latencyMs, chars: null, note: 'Routing failed — no brain answered.' });
-        } finally { setBusy(false); setStatus('idle'); }
+            setRoute(r => ({ ...r, latencyMs }));
+        }
     };
 
     const statusColor = status === 'idle' ? 'text-emerald-400' : 'text-amber-400';
     const statusLabel = status === 'idle' ? 'Idle' : status === 'routing' ? 'Routing' : 'Thinking';
     const runningTasks = tasks.filter(t => t.status === 'running').length;
+    const autoActive = vault.autoTools && !vault.preferLocal;
 
     const TOOL_CHIPS: { key: string; label: string; icon: React.ReactNode; busyKey: string }[] = [
         { key: 'compress', label: 'Compress', icon: <Scissors size={12} />, busyKey: 'compress' },
@@ -460,7 +515,11 @@ export const FusionApp: React.FC = () => {
                         <div className="text-[9px] font-mono tracking-[0.22em] uppercase text-[#74808f]">One Brain · Many Hands</div>
                     </div>
                 </div>
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-2.5">
+                    <button onClick={toggleAuto} title={vault.preferLocal ? 'Autonomous tool use runs on the cloud route' : 'Let the AI decide when to use a tool'}
+                        className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-[11px] font-mono transition ${autoActive ? 'bg-teal-500/15 border-teal-500/50 text-teal-200' : vault.autoTools ? 'bg-[#0a0e14] border-[#232c3a] text-[#74808f]' : 'bg-[#0a0e14] border-[#232c3a] text-[#74808f] hover:text-[#c9d1dc]'}`}>
+                        <Sparkles size={12} className={autoActive ? 'text-teal-300' : ''} /> Auto {vault.autoTools ? 'on' : 'off'}
+                    </button>
                     <div className="flex items-center rounded-lg border border-[#232c3a] bg-[#0a0e14] p-0.5 text-[11px] font-mono">
                         <button onClick={() => setPreferLocal(true)} className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md transition ${vault.preferLocal ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/40' : 'text-[#74808f] border border-transparent hover:text-[#c9d1dc]'}`} title="Prefer local hardware (Ollama), fall back to cloud"><HardDrive size={12} /> Local</button>
                         <button onClick={() => setPreferLocal(false)} className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md transition ${!vault.preferLocal ? 'bg-amber-500/15 text-amber-300 border border-amber-500/40' : 'text-[#74808f] border border-transparent hover:text-[#c9d1dc]'}`} title="Use cloud (Gemini)"><Cloud size={12} /> Cloud</button>
@@ -483,7 +542,7 @@ export const FusionApp: React.FC = () => {
                     <SettingField label="Local · Ollama endpoint" value={vault.ollamaEndpoint} placeholder="http://localhost:11434" onChange={val => setVault(v => ({ ...v, ollamaEndpoint: val }))} />
                     <SettingField label="Local · model" value={vault.ollamaModel} placeholder="llama3.2" onChange={val => setVault(v => ({ ...v, ollamaModel: val }))} />
                     <SettingField label="Telegram chat ID" value={vault.telegramChatId} placeholder="e.g. 123456789" onChange={val => setVault(v => ({ ...v, telegramChatId: val }))} />
-                    <p className="text-[9px] text-[#4a5566] leading-snug">Bot token is server-side (TELEGRAM_BOT_TOKEN). Saved to your local vault instantly.</p>
+                    <p className="text-[9px] text-[#4a5566] leading-snug">Bot token is server-side (TELEGRAM_BOT_TOKEN). Auto-invoke uses the cloud route. Saved to your local vault instantly.</p>
                 </div>
             )}
 
@@ -518,7 +577,7 @@ export const FusionApp: React.FC = () => {
                             <div className="h-full flex flex-col items-center justify-center text-center gap-3 px-6">
                                 <div className="w-12 h-12 rounded-2xl grid place-items-center bg-teal-500/10 border border-teal-500/30 text-teal-300"><Zap size={22} /></div>
                                 <div className="text-[15px] font-semibold text-white">Talk to the machine.</div>
-                                <p className="text-[12px] text-[#74808f] max-w-xs leading-relaxed">One mind for the whole OS. Ask anything, or reach for a hand below — <span className="text-teal-300">Compress · Scan · Save · Recall · Telegram · Run</span>. Results land in the canvas.</p>
+                                <p className="text-[12px] text-[#74808f] max-w-xs leading-relaxed">One mind for the whole OS. Ask anything, reach for a hand below, or flip <span className="text-teal-300">Auto on</span> to let the machine choose its own tools. Results land in the canvas.</p>
                             </div>
                         )}
 
@@ -566,7 +625,7 @@ export const FusionApp: React.FC = () => {
                     <div className="shrink-0 p-3 pt-2 flex items-end gap-2 bg-[#0c1119]">
                         <textarea value={input} onChange={e => setInput(e.target.value)}
                             onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
-                            rows={1} placeholder="Ask the machine…  or /compress /scan /save /recall /telegram /task  (Enter to send)"
+                            rows={1} placeholder={autoActive ? 'Ask the machine — it will pick its own tools…' : 'Ask the machine…  or /compress /scan /save /recall /telegram /task'}
                             disabled={busy}
                             className="flex-1 resize-none bg-[#0a0e14] border border-[#232c3a] focus:border-teal-500/50 rounded-xl px-3.5 py-2.5 text-[13px] text-[#e6ebf1] placeholder-[#4a5566] outline-none transition-colors max-h-32" />
                         <button onClick={send} disabled={busy || !!toolBusy || !input.trim()} className="shrink-0 h-[42px] w-[42px] grid place-items-center rounded-xl bg-teal-500 hover:bg-teal-400 disabled:bg-[#1a2129] disabled:text-[#4a5566] text-[#04231f] transition" title="Send">
@@ -581,7 +640,6 @@ export const FusionApp: React.FC = () => {
                     <div className="px-3 pb-3 space-y-3">
                         {toolResult && <ToolResultCard result={toolResult} />}
 
-                        {/* task queue */}
                         {tasks.length > 0 && (
                             <div className="rounded-xl border border-[#232c3a] bg-[#0a0e14] p-3">
                                 <div className="flex items-center gap-1.5 text-[9px] font-mono uppercase tracking-wider text-[#74808f] mb-2">
@@ -604,18 +662,17 @@ export const FusionApp: React.FC = () => {
                             </div>
                         )}
 
-                        {/* active route */}
                         <div className={`rounded-xl border p-3 ${vault.preferLocal ? 'border-emerald-500/30 bg-emerald-500/5' : 'border-amber-500/30 bg-amber-500/5'}`}>
                             <div className="flex items-center gap-1.5 text-[9px] font-mono uppercase tracking-wider mb-1.5">
                                 {vault.preferLocal ? <HardDrive size={11} className="text-emerald-400" /> : <Cloud size={11} className="text-amber-400" />}
                                 <span className={vault.preferLocal ? 'text-emerald-300' : 'text-amber-300'}>{vault.preferLocal ? 'Primary · Local' : 'Primary · Cloud'}</span>
+                                {autoActive && <span className="ml-auto flex items-center gap-1 text-teal-300 text-[8px]"><Sparkles size={9} /> auto</span>}
                             </div>
                             <div className="text-[12px] text-white font-medium">{vault.preferLocal ? vault.ollamaModel : MODEL_NAME}</div>
                             <div className="text-[10px] font-mono text-[#74808f] mt-0.5 truncate">{vault.preferLocal ? vault.ollamaEndpoint : '/api/gemini/generate'}</div>
                             {vault.preferLocal && <div className="text-[9px] font-mono text-[#4a5566] mt-1.5 flex items-center gap-1"><RefreshCw size={9} /> auto-fallback → cloud</div>}
                         </div>
 
-                        {/* last exchange telemetry */}
                         <div className="rounded-xl border border-[#232c3a] bg-[#0a0e14] p-3">
                             <div className="flex items-center gap-1.5 text-[9px] font-mono uppercase tracking-wider text-[#74808f] mb-2"><Activity size={11} className="text-teal-300" /> Last exchange</div>
                             <div className="space-y-1.5 text-[11px] font-mono">
@@ -627,7 +684,6 @@ export const FusionApp: React.FC = () => {
                             <div className="mt-2 pt-2 border-t border-[#1a212d] text-[10px] text-[#74808f] leading-snug">{route.note}</div>
                         </div>
 
-                        {/* tool bus — all live */}
                         <div className="rounded-xl border border-[#232c3a] bg-[#0a0e14] p-3">
                             <div className="flex items-center gap-1.5 text-[9px] font-mono uppercase tracking-wider text-[#74808f] mb-2"><Wrench size={11} className="text-teal-300" /> Tool bus <span className="ml-auto text-[8px] text-emerald-400">● 6 live</span></div>
                             <div className="space-y-1">
@@ -638,10 +694,10 @@ export const FusionApp: React.FC = () => {
                                         <span className="ml-auto text-[9px] text-[#4a5566]">{t.l}</span>
                                     </div>
                                 ))}
-                                <div className="flex items-center gap-2 py-1 opacity-45">
-                                    <ChevronRight size={11} className="text-[#4a5566]" />
-                                    <span className="text-[11px] font-mono text-[#9aa6b4]">autonomous invoke</span>
-                                    <span className="ml-auto text-[9px] text-[#4a5566]">Phase 4</span>
+                                <div className={`flex items-center gap-2 py-1 ${autoActive ? '' : 'opacity-45'}`}>
+                                    <ChevronRight size={11} className={autoActive ? 'text-teal-400' : 'text-[#4a5566]'} />
+                                    <span className={`text-[11px] font-mono ${autoActive ? 'text-teal-200' : 'text-[#9aa6b4]'}`}>autonomous invoke</span>
+                                    <span className="ml-auto text-[9px]" style={{ color: autoActive ? '#4ade80' : '#4a5566' }}>{autoActive ? '● on' : 'Auto off'}</span>
                                 </div>
                             </div>
                         </div>
@@ -709,7 +765,6 @@ const ToolResultCard: React.FC<{ result: ToolResult }> = ({ result }) => {
             </div>
         );
     }
-    // vault
     return (
         <div className="rounded-xl border border-teal-500/30 bg-teal-500/5 p-3">
             <div className="flex items-center gap-1.5 text-[9px] font-mono uppercase tracking-wider text-teal-300 mb-2">
