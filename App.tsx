@@ -57,9 +57,11 @@ import { BotStudioApp } from './components/apps/BotStudioApp';
 import { QpdbApp } from './components/apps/QpdbApp';
 import { MultiAgentConsensusLab } from './components/apps/MultiAgentConsensusLab';
 import { CyberSecurityRulebookApp } from './components/apps/CyberSecurityRulebookApp';
+import { FusionApp } from './components/apps/FusionApp';
 import { saveGlobalState, loadGlobalState } from './lib/persist';
 
 const INITIAL_DESKTOP_ITEMS: DesktopItem[] = [
+    { id: 'fusion', name: 'Fusion', type: 'app', icon: Cpu, appId: 'fusion', bgColor: 'bg-gradient-to-br from-teal-500 via-cyan-700 to-zinc-950 border border-teal-400/50 shadow-[0_0_15px_rgba(45,212,191,0.35)]' },
     { id: 'qpdb', name: 'qpdb Matrix', type: 'app', icon: Layers, appId: 'qpdb', bgColor: 'bg-gradient-to-br from-amber-600 via-rose-700 to-zinc-950 border border-amber-500/50 shadow-[0_0_15px_rgba(245,158,11,0.3)]' },
     { id: 'consensus_lab', name: 'Consensus Lab', type: 'app', icon: Network, appId: 'consensus_lab', bgColor: 'bg-gradient-to-br from-indigo-600 via-purple-700 to-zinc-950 border border-indigo-500/50 shadow-[0_0_15px_rgba(99,102,241,0.5)]' },
     { id: 'cloud_deploy', name: 'Global Deploy', type: 'app', icon: Cloud, appId: 'cloud_deploy', bgColor: 'bg-gradient-to-br from-blue-600 via-indigo-800 to-zinc-950 border border-blue-500/50 shadow-[0_0_15px_rgba(59,130,246,0.3)]' },
@@ -381,6 +383,7 @@ export const App: React.FC = () => {
         if (item.appId === 'knowledge_compressor') initialSize = { width: 1000, height: 680 };
         if (item.appId === 'supersayen') initialSize = { width: 1020, height: 700 };
         if (item.appId === 'jacky') initialSize = { width: 1020, height: 700 };
+        if (item.appId === 'fusion') initialSize = { width: 1040, height: 680 };
 
         setOpenWindows(prev => [...prev, {
             id: item.id,
@@ -881,6 +884,7 @@ Body: ${emailToSummarize.body}`,
                     else if (win.item.appId === 'cloud_deploy') content = <CloudDeployApp />;
                     else if (win.item.appId === 'bot_studio') content = <BotStudioApp />;
                     else if (win.item.appId === 'cyber_rulebook') content = <CyberSecurityRulebookApp />;
+                    else if (win.item.appId === 'fusion') content = <FusionApp />;
                     else if (win.item.appId) content = <UniversalAppSimulator appId={win.item.appId} appName={win.item.name} initialUrl={win.item.url} />;
                     else if (win.item.url) content = (
                         <iframe 
