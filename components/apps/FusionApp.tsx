@@ -2,21 +2,22 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
     Cpu, Send, Plus, Trash2, Cloud, HardDrive, Loader2, Zap, Activity,
     MessageSquare, ChevronRight, RefreshCw, Wrench, Circle, Scissors,
-    Shield, Save, Search, AlertTriangle, Archive
+    Shield, Save, Search, AlertTriangle, Archive, Settings, Rocket, X
 } from 'lucide-react';
 import { getAiClient, MODEL_NAME } from '../../lib/gemini';
 
 /**
- * FUSION — Phase 2
+ * FUSION — Phase 3
  * "One brain, many hands." A single conversational surface that routes to a
  * local brain (Ollama hardware) first and falls back to the cloud (Gemini)
  * automatically. Three calm zones: Memory · Conversation · Live Canvas.
  *
- * Phase 1 shipped: the shell, one real routed chat, the unified vault.
- * Phase 2 (this): the TOOL BUS — the AI's first real hands. compress /
- * scan_threat / save_to_vault / recall run genuine logic (reusing JackyV3's
- * prism-compression and threat-scan engines) and render results in the Live
- * Canvas. Invoke by clicking a tool chip or with a /slash command.
+ * Phase 1: the shell, one real routed chat, the unified vault.
+ * Phase 2: the tool bus — compress / scan_threat / save_to_vault / recall.
+ * Phase 3 (this): reach beyond the window —
+ *   • send_telegram — real /api/telegram/send integration
+ *   • run_task      — genuine fire-and-forget background job with a live queue
+ *   • Settings      — configure the local endpoint/model and Telegram chat ID
  */
 
 type Brain = 'local' | 'cloud';
@@ -40,27 +41,37 @@ interface FConversation {
 
 interface VaultArtifact {
     id: string;
-    kind: 'note' | 'compression' | 'scan';
+    kind: 'note' | 'compression' | 'scan' | 'task' | 'telegram';
     title: string;
     content: string;
     createdAt: number;
 }
 
 interface FVault {
-    version: 2;
+    version: 3;
     conversations: FConversation[];
     artifacts: VaultArtifact[];
     activeId: string | null;
     preferLocal: boolean;
     ollamaEndpoint: string;
     ollamaModel: string;
+    telegramChatId: string;
+}
+
+interface TaskItem {
+    id: string;
+    prompt: string;
+    status: 'running' | 'done' | 'failed';
+    startTs: number;
+    endTs?: number;
+    brain?: Brain;
+    error?: string;
 }
 
 const VAULT_KEY = 'fusion_vault_v1';
 
-const SYSTEM_PROMPT = `You are the unified intelligence of a local-first developer OS — one mind speaking for the whole machine. You are direct, warm, and technically deep with zero fluff. Lead with the answer; add depth only when it earns its place, so a human is never overwhelmed. You are offline-first and privacy-respecting. You have real tools on your bus: compress (squeeze text), scan_threat (audit a message for scams/phishing), save_to_vault (remember something), recall (search memory). When a request maps to one of these, tell the user which tool fits and that they can run it from the tool chips or a /command. Keep the human oriented at all times.`;
+const SYSTEM_PROMPT = `You are the unified intelligence of a local-first developer OS — one mind speaking for the whole machine. You are direct, warm, and technically deep with zero fluff. Lead with the answer; add depth only when it earns its place, so a human is never overwhelmed. You are offline-first and privacy-respecting. You have real tools on your bus: compress (squeeze text), scan_threat (audit a message for scams/phishing), save_to_vault (remember something), recall (search memory), send_telegram (message the user's real chat), run_task (dispatch a background job). When a request maps to a tool, tell the user which one fits and that they can run it from the tool chips or a /command. Keep the human oriented at all times.`;
 
-// --- Threat-scan heuristics (ported from JackyV3's real scanner) -------------
 const SCAM_PATTERNS = [
     { name: 'Urgency Trap', indicators: ['act now', 'limited time', 'urgent', 'only today', 'expires'], context: 'Artificial time pressure bypasses rational analysis' },
     { name: 'Authority Impersonation', indicators: ['official', 'from your bank', 'support team', 'verified account'], context: 'Mimics trust without verifiable proof' },
@@ -88,10 +99,10 @@ Return ONLY a raw JSON object, no markdown:
   "countermeasures": ["direct tip 1", "direct tip 2"]
 }`;
 
-const PENDING_NEXT = [
-    { name: 'send_telegram', lineage: 'server.ts', phase: 'Phase 3' },
-    { name: 'run_task', lineage: 'SuperSayen', phase: 'Phase 3' },
-];
+const TASK_PROMPT = (prompt: string) => `You are executing a background task for a builder. Complete it fully and return only the finished result — no preamble, no "here is".
+
+TASK:
+${prompt}`;
 
 const newConversation = (): FConversation => ({
     id: `c_${Date.now()}_${Math.floor(Math.random() * 9999)}`,
@@ -103,13 +114,14 @@ const newConversation = (): FConversation => ({
 const defaultVault = (): FVault => {
     const c = newConversation();
     return {
-        version: 2,
+        version: 3,
         conversations: [c],
         artifacts: [],
         activeId: c.id,
         preferLocal: false,
         ollamaEndpoint: 'http://localhost:11434',
         ollamaModel: 'llama3.2',
+        telegramChatId: '',
     };
 };
 
@@ -136,7 +148,9 @@ interface RouteInfo {
 type ToolResult =
     | { tool: 'compress'; inChars: number; outChars: number; ratioPct: number; text: string; ts: number }
     | { tool: 'scan'; level: string; score: string; hits: { name: string; context: string }[]; rationale: string; countermeasures: string[]; ts: number }
-    | { tool: 'vault'; action: 'saved' | 'search'; entries: VaultArtifact[]; query?: string; ts: number };
+    | { tool: 'vault'; action: 'saved' | 'search'; entries: VaultArtifact[]; query?: string; ts: number }
+    | { tool: 'telegram'; ok: boolean; detail: string; text: string; ts: number }
+    | { tool: 'task'; prompt: string; result: string; brain: Brain; elapsedS: number; ts: number };
 
 export const FusionApp: React.FC = () => {
     const [vault, setVault] = useState<FVault>(loadVault);
@@ -146,6 +160,8 @@ export const FusionApp: React.FC = () => {
     const [route, setRoute] = useState<RouteInfo>({ brain: null, fellBack: false, latencyMs: null, chars: null, note: 'Awaiting first transmission.' });
     const [toolBusy, setToolBusy] = useState<string | null>(null);
     const [toolResult, setToolResult] = useState<ToolResult | null>(null);
+    const [tasks, setTasks] = useState<TaskItem[]>([]);
+    const [showSettings, setShowSettings] = useState(false);
 
     const endRef = useRef<HTMLDivElement | null>(null);
 
@@ -161,17 +177,22 @@ export const FusionApp: React.FC = () => {
     }, [active?.messages.length, busy, toolBusy]);
 
     // --- vault mutations -----------------------------------------------------
-    const patchActive = useCallback((mut: (c: FConversation) => FConversation) => {
-        setVault(v => ({ ...v, conversations: v.conversations.map(c => (c.id === v.activeId ? mut(c) : c)) }));
+    const patchConv = useCallback((convId: string, mut: (c: FConversation) => FConversation) => {
+        setVault(v => ({ ...v, conversations: v.conversations.map(c => (c.id === convId ? mut(c) : c)) }));
     }, []);
 
-    const pushMsg = useCallback((m: FMessage) => {
-        patchActive(c => ({
+    const pushMsgTo = useCallback((convId: string, m: FMessage) => {
+        patchConv(convId, c => ({
             ...c,
             title: c.messages.length === 0 && m.role === 'user' ? m.content.slice(0, 42) : c.title,
             messages: [...c.messages, m],
         }));
-    }, [patchActive]);
+    }, [patchConv]);
+
+    // convenience: push to the currently active conversation
+    const pushMsg = useCallback((m: FMessage) => {
+        if (active) pushMsgTo(active.id, m);
+    }, [active, pushMsgTo]);
 
     const createSession = () => {
         const c = newConversation();
@@ -213,8 +234,8 @@ export const FusionApp: React.FC = () => {
         return String(data.response).trim();
     };
 
-    // single-prompt model call used by tools (route-aware, local-first with fallback)
-    const askModel = async (prompt: string, temperature = 0.2): Promise<string> => {
+    // single-prompt model call used by tools & tasks (route-aware, local-first w/ fallback)
+    const askModel = async (prompt: string, temperature = 0.2): Promise<{ text: string; brain: Brain }> => {
         if (vault.preferLocal) {
             try {
                 const res = await fetch('/api/ollama/real', {
@@ -222,12 +243,12 @@ export const FusionApp: React.FC = () => {
                     body: JSON.stringify({ messages: [{ role: 'user', content: prompt }], customEndpoint: vault.ollamaEndpoint, model: vault.ollamaModel, options: { temperature } }),
                 });
                 const data = await res.json().catch(() => ({}));
-                if (res.ok && data.response) return String(data.response).trim();
+                if (res.ok && data.response) return { text: String(data.response).trim(), brain: 'local' };
             } catch { /* fall through to cloud */ }
         }
         const ai = getAiClient();
         const r = await ai.models.generateContent({ model: MODEL_NAME, contents: prompt, config: { temperature } });
-        return (r.text || '').trim();
+        return { text: (r.text || '').trim(), brain: 'cloud' };
     };
 
     // --- TOOLS ---------------------------------------------------------------
@@ -236,7 +257,7 @@ export const FusionApp: React.FC = () => {
         pushMsg({ role: 'user', content: text, tool: 'compress', ts: Date.now() });
         setToolBusy('compress');
         try {
-            const out = await askModel(COMPRESS_PROMPT(text), 0.15);
+            const { text: out } = await askModel(COMPRESS_PROMPT(text), 0.15);
             const inChars = text.length, outChars = out.length;
             const ratioPct = inChars > 0 ? Math.max(0, Math.round(((inChars - outChars) / inChars) * 100)) : 0;
             setToolResult({ tool: 'compress', inChars, outChars, ratioPct, text: out, ts: Date.now() });
@@ -252,7 +273,6 @@ export const FusionApp: React.FC = () => {
         pushMsg({ role: 'user', content: text, tool: 'scan_threat', ts: Date.now() });
         setToolBusy('scan_threat');
 
-        // local heuristics always run — the scanner works even with no model.
         const low = text.toLowerCase();
         const hits: { name: string; context: string }[] = [];
         let score = 0;
@@ -265,7 +285,7 @@ export const FusionApp: React.FC = () => {
         let countermeasures = ['Do not reply or click any links.', 'Verify the sender through an independent channel.'];
 
         try {
-            const out = await askModel(SCAN_PROMPT(text), 0.1);
+            const { text: out } = await askModel(SCAN_PROMPT(text), 0.1);
             const jsonMatch = out.match(/\{[\s\S]*\}/);
             if (jsonMatch) {
                 const parsed = JSON.parse(jsonMatch[0]);
@@ -302,14 +322,76 @@ export const FusionApp: React.FC = () => {
         pushMsg({ role: 'assistant', content: entries.length ? `Recalled ${entries.length} vault ${entries.length === 1 ? 'entry' : 'entries'} → canvas.` : `Nothing in the vault matches "${query}" yet.`, tool: 'recall', ts: Date.now() });
     };
 
-    const runToolFromInput = (tool: 'compress' | 'scan' | 'save' | 'recall') => {
-        const text = input.trim();
-        if (!text) { setRoute(r => ({ ...r, note: 'Type text in the box first, then pick a tool.' })); return; }
-        setInput('');
+    // send_telegram — real /api/telegram/send integration
+    const runTelegram = async (text: string) => {
+        if (!text.trim() || toolBusy || busy) return;
+        if (!vault.telegramChatId.trim()) {
+            pushMsg({ role: 'user', content: text, tool: 'send_telegram', ts: Date.now() });
+            pushMsg({ role: 'assistant', content: 'No Telegram chat ID set yet. Open Settings (gear, top-right) and add your chat ID — then I can deliver messages to your real chat.', error: true, tool: 'send_telegram', ts: Date.now() });
+            setShowSettings(true);
+            return;
+        }
+        pushMsg({ role: 'user', content: text, tool: 'send_telegram', ts: Date.now() });
+        setToolBusy('send_telegram');
+        try {
+            const res = await fetch('/api/telegram/send', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ chat_id: vault.telegramChatId, text }),
+            });
+            const data = await res.json().catch(() => ({}));
+            const ok = res.ok && data.ok !== false && !data.error;
+            const detail = ok ? 'Delivered' : (data.description || data.error || `HTTP ${res.status}`);
+            setToolResult({ tool: 'telegram', ok, detail, text, ts: Date.now() });
+            if (ok) addArtifact({ id: `a_${Date.now()}`, kind: 'telegram', title: `Telegram: ${text.slice(0, 32)}`, content: text, createdAt: Date.now() });
+            pushMsg({ role: 'assistant', content: ok ? `Sent to your Telegram ✓` : `⚠️ Telegram send failed: ${detail}. (The bot token is set server-side via TELEGRAM_BOT_TOKEN.)`, error: !ok, tool: 'send_telegram', ts: Date.now() });
+        } catch (err: any) {
+            setToolResult({ tool: 'telegram', ok: false, detail: err?.message || 'network error', text, ts: Date.now() });
+            pushMsg({ role: 'assistant', content: `⚠️ Telegram send failed: ${err?.message || 'network error'}.`, error: true, tool: 'send_telegram', ts: Date.now() });
+        } finally { setToolBusy(null); }
+    };
+
+    // run_task — genuine fire-and-forget background job (does NOT block the chat)
+    const runTask = (prompt: string) => {
+        if (!prompt.trim() || busy) return;
+        const convId = active?.id;
+        if (!convId) return;
+        const id = `t_${Date.now()}_${Math.floor(Math.random() * 999)}`;
+        const startTs = Date.now();
+        setTasks(prev => [{ id, prompt, status: 'running', startTs }, ...prev].slice(0, 20));
+        pushMsgTo(convId, { role: 'user', content: prompt, tool: 'run_task', ts: Date.now() });
+        pushMsgTo(convId, { role: 'assistant', content: `Task dispatched to the background (#${id.slice(-4)}). Keep working — I'll drop the result here when it lands.`, tool: 'run_task', ts: Date.now() });
+
+        // fire and forget — the chat stays fully usable while this runs
+        askModel(TASK_PROMPT(prompt), 0.5)
+            .then(({ text: out, brain }) => {
+                const endTs = Date.now();
+                const elapsedS = Math.max(0, Math.round((endTs - startTs) / 1000));
+                setTasks(prev => prev.map(t => t.id === id ? { ...t, status: 'done', endTs, brain } : t));
+                addArtifact({ id: `a_${Date.now()}`, kind: 'task', title: `Task: ${prompt.slice(0, 34)}`, content: out, createdAt: Date.now() });
+                setToolResult({ tool: 'task', prompt, result: out, brain, elapsedS, ts: Date.now() });
+                pushMsgTo(convId, { role: 'assistant', content: `✅ Task #${id.slice(-4)} complete (${elapsedS}s · ${brain}):\n\n${out}`, tool: 'run_task', ts: Date.now() });
+            })
+            .catch((err: any) => {
+                const endTs = Date.now();
+                setTasks(prev => prev.map(t => t.id === id ? { ...t, status: 'failed', endTs, error: String(err?.message || err) } : t));
+                pushMsgTo(convId, { role: 'assistant', content: `⚠️ Task #${id.slice(-4)} failed: ${err?.message || 'unknown error'}.`, error: true, tool: 'run_task', ts: Date.now() });
+            });
+    };
+
+    const dispatchTool = (tool: string, text: string) => {
         if (tool === 'compress') runCompress(text);
         else if (tool === 'scan') runScan(text);
         else if (tool === 'save') runSave(text);
-        else runRecall(text);
+        else if (tool === 'recall') runRecall(text);
+        else if (tool === 'telegram') runTelegram(text);
+        else if (tool === 'task') runTask(text);
+    };
+
+    const runToolFromInput = (tool: string) => {
+        const text = input.trim();
+        if (!text && tool !== 'recall') { setRoute(r => ({ ...r, note: 'Type text in the box first, then pick a tool.' })); return; }
+        setInput('');
+        dispatchTool(tool, text);
     };
 
     // --- chat send (with /slash tool routing) --------------------------------
@@ -317,17 +399,13 @@ export const FusionApp: React.FC = () => {
         const raw = input.trim();
         if (!raw || busy || toolBusy) return;
 
-        // slash-command tool routing — deterministic, visible, human-comprehensible
-        const slash = raw.match(/^\/(compress|scan|save|recall)\s*([\s\S]*)$/i);
+        const slash = raw.match(/^\/(compress|scan|save|recall|telegram|task)\s*([\s\S]*)$/i);
         if (slash) {
             const cmd = slash[1].toLowerCase();
             const arg = slash[2].trim();
             if (cmd !== 'recall' && !arg) { setRoute(r => ({ ...r, note: `/${cmd} needs text after it.` })); return; }
             setInput('');
-            if (cmd === 'compress') runCompress(arg);
-            else if (cmd === 'scan') runScan(arg);
-            else if (cmd === 'save') runSave(arg);
-            else runRecall(arg);
+            dispatchTool(cmd, arg);
             return;
         }
 
@@ -360,16 +438,19 @@ export const FusionApp: React.FC = () => {
 
     const statusColor = status === 'idle' ? 'text-emerald-400' : 'text-amber-400';
     const statusLabel = status === 'idle' ? 'Idle' : status === 'routing' ? 'Routing' : 'Thinking';
+    const runningTasks = tasks.filter(t => t.status === 'running').length;
 
-    const TOOL_CHIPS: { key: 'compress' | 'scan' | 'save' | 'recall'; label: string; icon: React.ReactNode; busyKey: string }[] = [
+    const TOOL_CHIPS: { key: string; label: string; icon: React.ReactNode; busyKey: string }[] = [
         { key: 'compress', label: 'Compress', icon: <Scissors size={12} />, busyKey: 'compress' },
         { key: 'scan', label: 'Scan', icon: <Shield size={12} />, busyKey: 'scan_threat' },
         { key: 'save', label: 'Save', icon: <Save size={12} />, busyKey: 'save_to_vault' },
         { key: 'recall', label: 'Recall', icon: <Search size={12} />, busyKey: 'recall' },
+        { key: 'telegram', label: 'Telegram', icon: <Send size={12} />, busyKey: 'send_telegram' },
+        { key: 'task', label: 'Run', icon: <Rocket size={12} />, busyKey: 'run_task' },
     ];
 
     return (
-        <div className="h-full w-full flex flex-col bg-[#0a0e14] text-[#c9d1dc] font-sans select-none overflow-hidden">
+        <div className="relative h-full w-full flex flex-col bg-[#0a0e14] text-[#c9d1dc] font-sans select-none overflow-hidden">
             {/* Header */}
             <div className="shrink-0 flex items-center justify-between gap-3 px-4 py-2.5 border-b border-[#232c3a] bg-[#0c1119]">
                 <div className="flex items-center gap-2.5">
@@ -388,8 +469,23 @@ export const FusionApp: React.FC = () => {
                         <Circle size={8} className={`${statusColor} fill-current ${status !== 'idle' ? 'animate-pulse' : ''}`} />
                         <span className={statusColor}>{statusLabel}</span>
                     </div>
+                    <button onClick={() => setShowSettings(s => !s)} className={`w-7 h-7 grid place-items-center rounded-md border transition ${showSettings ? 'bg-teal-500/15 border-teal-500/40 text-teal-300' : 'border-[#232c3a] text-[#74808f] hover:text-[#c9d1dc]'}`} title="Settings"><Settings size={14} /></button>
                 </div>
             </div>
+
+            {/* Settings panel */}
+            {showSettings && (
+                <div className="absolute right-3 top-14 z-30 w-72 rounded-xl border border-[#232c3a] bg-[#0c1119] shadow-2xl shadow-black/60 p-3.5 space-y-3">
+                    <div className="flex items-center justify-between">
+                        <span className="text-[10px] font-mono uppercase tracking-wider text-teal-300">Settings</span>
+                        <button onClick={() => setShowSettings(false)} className="text-[#74808f] hover:text-white"><X size={14} /></button>
+                    </div>
+                    <SettingField label="Local · Ollama endpoint" value={vault.ollamaEndpoint} placeholder="http://localhost:11434" onChange={val => setVault(v => ({ ...v, ollamaEndpoint: val }))} />
+                    <SettingField label="Local · model" value={vault.ollamaModel} placeholder="llama3.2" onChange={val => setVault(v => ({ ...v, ollamaModel: val }))} />
+                    <SettingField label="Telegram chat ID" value={vault.telegramChatId} placeholder="e.g. 123456789" onChange={val => setVault(v => ({ ...v, telegramChatId: val }))} />
+                    <p className="text-[9px] text-[#4a5566] leading-snug">Bot token is server-side (TELEGRAM_BOT_TOKEN). Saved to your local vault instantly.</p>
+                </div>
+            )}
 
             <div className="flex-1 min-h-0 grid grid-cols-[200px_1fr_246px] max-[720px]:grid-cols-1 max-[720px]:overflow-y-auto">
                 {/* ZONE 1 — MEMORY */}
@@ -411,7 +507,7 @@ export const FusionApp: React.FC = () => {
                         })}
                     </div>
                     <div className="shrink-0 px-3 py-2 border-t border-[#232c3a] flex items-center gap-1.5 text-[9px] font-mono text-[#4a5566]">
-                        <Archive size={10} /> {vault.artifacts.length} vault item{vault.artifacts.length === 1 ? '' : 's'} · {vault.conversations.length} session{vault.conversations.length === 1 ? '' : 's'}
+                        <Archive size={10} /> {vault.artifacts.length} vault · {vault.conversations.length} session{vault.conversations.length === 1 ? '' : 's'}
                     </div>
                 </aside>
 
@@ -422,7 +518,7 @@ export const FusionApp: React.FC = () => {
                             <div className="h-full flex flex-col items-center justify-center text-center gap-3 px-6">
                                 <div className="w-12 h-12 rounded-2xl grid place-items-center bg-teal-500/10 border border-teal-500/30 text-teal-300"><Zap size={22} /></div>
                                 <div className="text-[15px] font-semibold text-white">Talk to the machine.</div>
-                                <p className="text-[12px] text-[#74808f] max-w-xs leading-relaxed">One mind for the whole OS. Ask anything, or reach for a tool below — <span className="text-teal-300">Compress</span>, <span className="text-teal-300">Scan</span>, <span className="text-teal-300">Save</span>, <span className="text-teal-300">Recall</span>. Results land in the canvas.</p>
+                                <p className="text-[12px] text-[#74808f] max-w-xs leading-relaxed">One mind for the whole OS. Ask anything, or reach for a hand below — <span className="text-teal-300">Compress · Scan · Save · Recall · Telegram · Run</span>. Results land in the canvas.</p>
                             </div>
                         )}
 
@@ -470,7 +566,7 @@ export const FusionApp: React.FC = () => {
                     <div className="shrink-0 p-3 pt-2 flex items-end gap-2 bg-[#0c1119]">
                         <textarea value={input} onChange={e => setInput(e.target.value)}
                             onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
-                            rows={1} placeholder="Ask the machine…  or /compress /scan /save /recall  (Enter to send)"
+                            rows={1} placeholder="Ask the machine…  or /compress /scan /save /recall /telegram /task  (Enter to send)"
                             disabled={busy}
                             className="flex-1 resize-none bg-[#0a0e14] border border-[#232c3a] focus:border-teal-500/50 rounded-xl px-3.5 py-2.5 text-[13px] text-[#e6ebf1] placeholder-[#4a5566] outline-none transition-colors max-h-32" />
                         <button onClick={send} disabled={busy || !!toolBusy || !input.trim()} className="shrink-0 h-[42px] w-[42px] grid place-items-center rounded-xl bg-teal-500 hover:bg-teal-400 disabled:bg-[#1a2129] disabled:text-[#4a5566] text-[#04231f] transition" title="Send">
@@ -483,8 +579,30 @@ export const FusionApp: React.FC = () => {
                 <aside className="min-h-0 flex flex-col border-l border-[#232c3a] bg-[#0b0f16] overflow-y-auto max-[720px]:border-l-0 max-[720px]:border-t">
                     <div className="px-3 py-2 shrink-0"><span className="text-[9px] font-mono tracking-[0.2em] uppercase text-[#74808f]">Live Canvas</span></div>
                     <div className="px-3 pb-3 space-y-3">
-                        {/* tool result */}
                         {toolResult && <ToolResultCard result={toolResult} />}
+
+                        {/* task queue */}
+                        {tasks.length > 0 && (
+                            <div className="rounded-xl border border-[#232c3a] bg-[#0a0e14] p-3">
+                                <div className="flex items-center gap-1.5 text-[9px] font-mono uppercase tracking-wider text-[#74808f] mb-2">
+                                    <Rocket size={11} className="text-teal-300" /> Task queue
+                                    {runningTasks > 0 && <span className="ml-auto text-[8px] text-amber-400">{runningTasks} running</span>}
+                                </div>
+                                <div className="space-y-1.5">
+                                    {tasks.slice(0, 6).map(t => {
+                                        const color = t.status === 'running' ? '#f0b429' : t.status === 'done' ? '#4ade80' : '#f0596a';
+                                        const elapsed = t.endTs ? `${Math.max(0, Math.round((t.endTs - t.startTs) / 1000))}s` : 'running…';
+                                        return (
+                                            <div key={t.id} className="flex items-center gap-2 text-[10px]">
+                                                <Circle size={7} className={`fill-current ${t.status === 'running' ? 'animate-pulse' : ''}`} style={{ color }} />
+                                                <span className="flex-1 truncate text-[#c9d1dc]">{t.prompt}</span>
+                                                <span className="font-mono text-[9px]" style={{ color, fontVariantNumeric: 'tabular-nums' }}>{elapsed}</span>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                        )}
 
                         {/* active route */}
                         <div className={`rounded-xl border p-3 ${vault.preferLocal ? 'border-emerald-500/30 bg-emerald-500/5' : 'border-amber-500/30 bg-amber-500/5'}`}>
@@ -509,24 +627,22 @@ export const FusionApp: React.FC = () => {
                             <div className="mt-2 pt-2 border-t border-[#1a212d] text-[10px] text-[#74808f] leading-snug">{route.note}</div>
                         </div>
 
-                        {/* tool bus — active */}
+                        {/* tool bus — all live */}
                         <div className="rounded-xl border border-[#232c3a] bg-[#0a0e14] p-3">
-                            <div className="flex items-center gap-1.5 text-[9px] font-mono uppercase tracking-wider text-[#74808f] mb-2"><Wrench size={11} className="text-teal-300" /> Tool bus <span className="ml-auto text-[8px] text-emerald-400">● live</span></div>
+                            <div className="flex items-center gap-1.5 text-[9px] font-mono uppercase tracking-wider text-[#74808f] mb-2"><Wrench size={11} className="text-teal-300" /> Tool bus <span className="ml-auto text-[8px] text-emerald-400">● 6 live</span></div>
                             <div className="space-y-1">
-                                {[{ n: 'compress', l: 'JackyV3' }, { n: 'scan_threat', l: 'JackyV3' }, { n: 'save_to_vault', l: 'Cybernetic67' }, { n: 'recall', l: 'vault' }].map(t => (
+                                {[{ n: 'compress', l: 'JackyV3' }, { n: 'scan_threat', l: 'JackyV3' }, { n: 'save_to_vault', l: 'Cybernetic67' }, { n: 'recall', l: 'vault' }, { n: 'send_telegram', l: 'server.ts' }, { n: 'run_task', l: 'SuperSayen' }].map(t => (
                                     <div key={t.n} className="flex items-center gap-2 py-1">
                                         <ChevronRight size={11} className="text-teal-400" />
                                         <span className="text-[11px] font-mono text-[#c9d1dc]">{t.n}</span>
                                         <span className="ml-auto text-[9px] text-[#4a5566]">{t.l}</span>
                                     </div>
                                 ))}
-                                {PENDING_NEXT.map(t => (
-                                    <div key={t.name} className="flex items-center gap-2 py-1 opacity-45">
-                                        <ChevronRight size={11} className="text-[#4a5566]" />
-                                        <span className="text-[11px] font-mono text-[#9aa6b4]">{t.name}</span>
-                                        <span className="ml-auto text-[9px] text-[#4a5566]">{t.phase}</span>
-                                    </div>
-                                ))}
+                                <div className="flex items-center gap-2 py-1 opacity-45">
+                                    <ChevronRight size={11} className="text-[#4a5566]" />
+                                    <span className="text-[11px] font-mono text-[#9aa6b4]">autonomous invoke</span>
+                                    <span className="ml-auto text-[9px] text-[#4a5566]">Phase 4</span>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -571,6 +687,28 @@ const ToolResultCard: React.FC<{ result: ToolResult }> = ({ result }) => {
             </div>
         );
     }
+    if (result.tool === 'telegram') {
+        const color = result.ok ? '#4ade80' : '#f0596a';
+        return (
+            <div className="rounded-xl border p-3" style={{ borderColor: `${color}55`, background: `${color}0f` }}>
+                <div className="flex items-center gap-1.5 text-[9px] font-mono uppercase tracking-wider mb-2" style={{ color }}><Send size={11} /> Telegram · {result.ok ? 'sent' : 'failed'}</div>
+                <div className="text-[11px] text-[#c9d1dc] leading-snug bg-[#0a0e14] rounded-lg border border-[#1a212d] p-2 mb-1.5 select-text whitespace-pre-wrap">{result.text}</div>
+                <div className="text-[10px] font-mono" style={{ color }}>{result.detail}</div>
+            </div>
+        );
+    }
+    if (result.tool === 'task') {
+        return (
+            <div className="rounded-xl border border-teal-500/30 bg-teal-500/5 p-3">
+                <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-1.5 text-[9px] font-mono uppercase tracking-wider text-teal-300"><Rocket size={11} /> Task complete</div>
+                    <span className="text-[9px] font-mono text-[#74808f]" style={{ fontVariantNumeric: 'tabular-nums' }}>{result.elapsedS}s · {result.brain}</span>
+                </div>
+                <div className="text-[10px] text-[#74808f] mb-1.5 italic">{result.prompt}</div>
+                <div className="text-[11px] leading-relaxed text-[#c9d1dc] whitespace-pre-wrap max-h-56 overflow-y-auto bg-[#0a0e14] rounded-lg border border-[#1a212d] p-2.5 select-text">{result.result}</div>
+            </div>
+        );
+    }
     // vault
     return (
         <div className="rounded-xl border border-teal-500/30 bg-teal-500/5 p-3">
@@ -592,6 +730,14 @@ const ToolResultCard: React.FC<{ result: ToolResult }> = ({ result }) => {
         </div>
     );
 };
+
+const SettingField: React.FC<{ label: string; value: string; placeholder: string; onChange: (v: string) => void }> = ({ label, value, placeholder, onChange }) => (
+    <label className="block space-y-1">
+        <span className="text-[9px] font-mono uppercase tracking-wider text-[#74808f]">{label}</span>
+        <input value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder}
+            className="w-full bg-[#0a0e14] border border-[#232c3a] focus:border-teal-500/50 rounded-lg px-2.5 py-1.5 text-[11px] font-mono text-[#e6ebf1] placeholder-[#4a5566] outline-none transition-colors" />
+    </label>
+);
 
 const Telemetry: React.FC<{ label: string; value: string; valueClass?: string }> = ({ label, value, valueClass }) => (
     <div className="flex items-center justify-between">
