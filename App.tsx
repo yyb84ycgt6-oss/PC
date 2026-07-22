@@ -291,9 +291,26 @@ export const App: React.FC = () => {
         }).filter(Boolean);
     }
 
+    // First boot (no persisted state): open Fusion as the default landing app.
+    // On every later load we respect whatever the user left open, so this never
+    // forces itself back once they've closed it.
+    const isFirstBoot = !globalState;
+    if (isFirstBoot) {
+        const fusionItem = initialDesktopItems.find(d => d?.appId === 'fusion');
+        if (fusionItem) {
+            initialWindows = [{
+                id: fusionItem.id,
+                item: fusionItem,
+                zIndex: 100,
+                pos: { x: 90, y: 60 },
+                size: { width: 1040, height: 680 },
+            }];
+        }
+    }
+
     const [openWindows, setOpenWindows] = useState<OpenWindow[]>(initialWindows);
-    const [focusedId, setFocusedId] = useState<string | null>(globalState?.focusedId || null);
-    const [nextZIndex, setNextZIndex] = useState(globalState?.nextZIndex || 100);
+    const [focusedId, setFocusedId] = useState<string | null>(globalState?.focusedId || (initialWindows[0]?.id ?? null));
+    const [nextZIndex, setNextZIndex] = useState(globalState?.nextZIndex || 101);
     const [inkMode, setInkMode] = useState(false);
     const [showInkToolbar, setShowInkToolbar] = useState(false);
     const [strokes, setStrokes] = useState<Stroke[]>([]);
