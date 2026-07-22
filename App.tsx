@@ -50,7 +50,6 @@ import { AiDataResolverApp } from './components/apps/AiDataResolverApp';
 import { FunctionCallKitchenApp } from './components/apps/FunctionCallKitchenApp';
 import { FlashUiApp } from './components/apps/FlashUiApp';
 import { AgenticVisionApp } from './components/apps/AgenticVisionApp';
-import { UniversalAppSimulator } from './components/apps/UniversalAppSimulator';
 import { PodSystemApp } from './components/apps/PodSystemApp';
 import { CloudDeployApp } from './components/apps/CloudDeployApp';
 import { BotStudioApp } from './components/apps/BotStudioApp';
@@ -902,15 +901,20 @@ Body: ${emailToSummarize.body}`,
                     else if (win.item.appId === 'bot_studio') content = <BotStudioApp />;
                     else if (win.item.appId === 'cyber_rulebook') content = <CyberSecurityRulebookApp />;
                     else if (win.item.appId === 'fusion') content = <FusionApp />;
-                    else if (win.item.appId) content = <UniversalAppSimulator appId={win.item.appId} appName={win.item.name} initialUrl={win.item.url} />;
                     else if (win.item.url) content = (
-                        <iframe 
-                            src={win.item.url} 
-                            className="w-full h-full border-none bg-zinc-950" 
-                            sandbox="allow-scripts allow-same-origin allow-forms allow-popups" 
+                        <iframe
+                            src={win.item.url}
+                            className="w-full h-full border-none bg-zinc-950"
+                            sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
                             referrerPolicy="no-referrer"
                             title={win.item.name}
                         />
+                    );
+                    else if (win.item.appId) content = (
+                        <div className="h-full w-full flex flex-col items-center justify-center gap-2 bg-zinc-950 text-zinc-500 select-none">
+                            <div className="text-sm font-semibold text-zinc-300">{win.item.name}</div>
+                            <div className="text-xs text-zinc-600">This app isn't available.</div>
+                        </div>
                     );
 
                     return (
