@@ -50,16 +50,17 @@ import { AiDataResolverApp } from './components/apps/AiDataResolverApp';
 import { FunctionCallKitchenApp } from './components/apps/FunctionCallKitchenApp';
 import { FlashUiApp } from './components/apps/FlashUiApp';
 import { AgenticVisionApp } from './components/apps/AgenticVisionApp';
-import { UniversalAppSimulator } from './components/apps/UniversalAppSimulator';
 import { PodSystemApp } from './components/apps/PodSystemApp';
 import { CloudDeployApp } from './components/apps/CloudDeployApp';
 import { BotStudioApp } from './components/apps/BotStudioApp';
 import { QpdbApp } from './components/apps/QpdbApp';
 import { MultiAgentConsensusLab } from './components/apps/MultiAgentConsensusLab';
 import { CyberSecurityRulebookApp } from './components/apps/CyberSecurityRulebookApp';
+import { FusionApp } from './components/apps/FusionApp';
 import { saveGlobalState, loadGlobalState } from './lib/persist';
 
 const INITIAL_DESKTOP_ITEMS: DesktopItem[] = [
+    { id: 'fusion', name: 'Fusion', type: 'app', icon: Cpu, appId: 'fusion', bgColor: 'bg-gradient-to-br from-teal-500 via-cyan-700 to-zinc-950 border border-teal-400/50 shadow-[0_0_15px_rgba(45,212,191,0.35)]' },
     { id: 'qpdb', name: 'qpdb Matrix', type: 'app', icon: Layers, appId: 'qpdb', bgColor: 'bg-gradient-to-br from-amber-600 via-rose-700 to-zinc-950 border border-amber-500/50 shadow-[0_0_15px_rgba(245,158,11,0.3)]' },
     { id: 'consensus_lab', name: 'Consensus Lab', type: 'app', icon: Network, appId: 'consensus_lab', bgColor: 'bg-gradient-to-br from-indigo-600 via-purple-700 to-zinc-950 border border-indigo-500/50 shadow-[0_0_15px_rgba(99,102,241,0.5)]' },
     { id: 'cloud_deploy', name: 'Global Deploy', type: 'app', icon: Cloud, appId: 'cloud_deploy', bgColor: 'bg-gradient-to-br from-blue-600 via-indigo-800 to-zinc-950 border border-blue-500/50 shadow-[0_0_15px_rgba(59,130,246,0.3)]' },
@@ -289,9 +290,26 @@ export const App: React.FC = () => {
         }).filter(Boolean);
     }
 
+    // First boot (no persisted state): open Fusion as the default landing app.
+    // On every later load we respect whatever the user left open, so this never
+    // forces itself back once they've closed it.
+    const isFirstBoot = !globalState;
+    if (isFirstBoot) {
+        const fusionItem = initialDesktopItems.find(d => d?.appId === 'fusion');
+        if (fusionItem) {
+            initialWindows = [{
+                id: fusionItem.id,
+                item: fusionItem,
+                zIndex: 100,
+                pos: { x: 90, y: 60 },
+                size: { width: 1040, height: 680 },
+            }];
+        }
+    }
+
     const [openWindows, setOpenWindows] = useState<OpenWindow[]>(initialWindows);
-    const [focusedId, setFocusedId] = useState<string | null>(globalState?.focusedId || null);
-    const [nextZIndex, setNextZIndex] = useState(globalState?.nextZIndex || 100);
+    const [focusedId, setFocusedId] = useState<string | null>(globalState?.focusedId || (initialWindows[0]?.id ?? null));
+    const [nextZIndex, setNextZIndex] = useState(globalState?.nextZIndex || 101);
     const [inkMode, setInkMode] = useState(false);
     const [showInkToolbar, setShowInkToolbar] = useState(false);
     const [strokes, setStrokes] = useState<Stroke[]>([]);
@@ -381,6 +399,7 @@ export const App: React.FC = () => {
         if (item.appId === 'knowledge_compressor') initialSize = { width: 1000, height: 680 };
         if (item.appId === 'supersayen') initialSize = { width: 1020, height: 700 };
         if (item.appId === 'jacky') initialSize = { width: 1020, height: 700 };
+        if (item.appId === 'fusion') initialSize = { width: 1040, height: 680 };
 
         setOpenWindows(prev => [...prev, {
             id: item.id,
@@ -881,15 +900,21 @@ Body: ${emailToSummarize.body}`,
                     else if (win.item.appId === 'cloud_deploy') content = <CloudDeployApp />;
                     else if (win.item.appId === 'bot_studio') content = <BotStudioApp />;
                     else if (win.item.appId === 'cyber_rulebook') content = <CyberSecurityRulebookApp />;
-                    else if (win.item.appId) content = <UniversalAppSimulator appId={win.item.appId} appName={win.item.name} initialUrl={win.item.url} />;
+                    else if (win.item.appId === 'fusion') content = <FusionApp />;
                     else if (win.item.url) content = (
-                        <iframe 
-                            src={win.item.url} 
-                            className="w-full h-full border-none bg-zinc-950" 
-                            sandbox="allow-scripts allow-same-origin allow-forms allow-popups" 
+                        <iframe
+                            src={win.item.url}
+                            className="w-full h-full border-none bg-zinc-950"
+                            sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
                             referrerPolicy="no-referrer"
                             title={win.item.name}
                         />
+                    );
+                    else if (win.item.appId) content = (
+                        <div className="h-full w-full flex flex-col items-center justify-center gap-2 bg-zinc-950 text-zinc-500 select-none">
+                            <div className="text-sm font-semibold text-zinc-300">{win.item.name}</div>
+                            <div className="text-xs text-zinc-600">This app isn't available.</div>
+                        </div>
                     );
 
                     return (
