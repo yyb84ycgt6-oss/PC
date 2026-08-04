@@ -5,170 +5,113 @@
 
 import GeminiBridge, { type GeminiConfig } from './gemini-bridge';
 
+export type StudioTaskType = 'generate' | 'analyze' | 'enhance' | 'debug' | 'document';
+
 export interface StudioTask {
   id: string;
-  type: 'generate' | 'analyze' | 'enhance' | 'debug' | 'document';
+  type: StudioTaskType;
   description: string;
   context?: Record<string, unknown>;
   status: 'pending' | 'running' | 'completed' | 'failed';
-  result?: unknown;
+  result?: string;
   error?: string;
   timestamp: Date;
 }
 
 export interface StudioConfig {
   gemini: GeminiConfig;
-  autoSave?: boolean;
   maxHistory?: number;
 }
 
+let taskCounter = 0;
+
 class StudioOrchestrator {
-  private gemini: GeminiBridge;
+  /** Exposed so callers can send bespoke prompts without a task wrapper. */
+  readonly gemini: GeminiBridge;
+
   private tasks: Map<string, StudioTask> = new Map();
   private history: StudioTask[] = [];
   private config: StudioConfig;
 
   constructor(config: StudioConfig) {
-    this.config = {
-      autoSave: false,
-      maxHistory: 50,
-      ...config,
-    };
+    this.config = { maxHistory: 50, ...config };
     this.gemini = new GeminiBridge(config.gemini);
   }
 
-  async generateComponent(description: string, imageUrl?: string): Promise<StudioTask> {
+  /**
+   * Single path every task flows through: build the task, call Gemini, record
+   * the outcome. Keeps status/error/history handling identical everywhere.
+   */
+  private async run(
+    type: StudioTaskType,
+    description: string,
+    prompt: string,
+    options: { image?: string; context?: Record<string, unknown> } = {}
+  ): Promise<StudioTask> {
     const task: StudioTask = {
-      id: `task_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-      type: 'generate',
+      id: `task_${Date.now()}_${++taskCounter}`,
+      type,
       description,
+      context: options.context,
       status: 'running',
       timestamp: new Date(),
     };
-
     this.tasks.set(task.id, task);
 
     try {
-      const systemPrompt = `You are an expert React component generator.
-Generate clean, well-structured React components using TypeScript and Tailwind CSS.
-Follow shadcn/ui component patterns when applicable.`;
-
-      const response = await this.gemini.prompt(`${systemPrompt}\n\nGenerate: ${description}`, imageUrl);
-
+      const response = await this.gemini.prompt(prompt, options.image);
       task.result = response.text;
       task.status = 'completed';
-    } catch (error) {
+    } catch (cause) {
       task.status = 'failed';
-      task.error = error instanceof Error ? error.message : 'Unknown error';
+      task.error = cause instanceof Error ? cause.message : String(cause);
     }
 
     this.addToHistory(task);
     return task;
   }
 
-  async analyzeCode(code: string): Promise<StudioTask> {
-    const task: StudioTask = {
-      id: `task_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-      type: 'analyze',
-      description: 'Analyze code',
-      status: 'running',
-      timestamp: new Date(),
-    };
-
-    this.tasks.set(task.id, task);
-
-    try {
-      const response = await this.gemini.prompt(`Analyze this code and provide insights:\n\n${code}`);
-      task.result = response.text;
-      task.status = 'completed';
-    } catch (error) {
-      task.status = 'failed';
-      task.error = error instanceof Error ? error.message : 'Unknown error';
-    }
-
-    this.addToHistory(task);
-    return task;
+  generateComponent(description: string, image?: string): Promise<StudioTask> {
+    const prompt = [
+      'You are an expert React component generator.',
+      'Generate clean, well-structured components using TypeScript and Tailwind CSS.',
+      'Follow shadcn/ui patterns where applicable. Return only code.',
+      '',
+      `Generate: ${description}`,
+    ].join('\n');
+    return this.run('generate', description, prompt, { image });
   }
 
-  async enhanceCode(code: string, enhancement: string): Promise<StudioTask> {
-    const task: StudioTask = {
-      id: `task_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-      type: 'enhance',
-      description: enhancement,
-      status: 'running',
-      timestamp: new Date(),
-      context: { originalCode: code },
-    };
-
-    this.tasks.set(task.id, task);
-
-    try {
-      const prompt = `Enhance the following code with: ${enhancement}\n\nCode:\n${code}`;
-      const response = await this.gemini.prompt(prompt);
-      task.result = response.text;
-      task.status = 'completed';
-    } catch (error) {
-      task.status = 'failed';
-      task.error = error instanceof Error ? error.message : 'Unknown error';
-    }
-
-    this.addToHistory(task);
-    return task;
+  analyzeCode(code: string): Promise<StudioTask> {
+    return this.run(
+      'analyze',
+      'Analyze code',
+      `Analyze this code and report structure, likely bugs, performance concerns, and best-practice gaps:\n\n${code}`
+    );
   }
 
-  async debugIssue(error: string, context?: string): Promise<StudioTask> {
-    const task: StudioTask = {
-      id: `task_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-      type: 'debug',
-      description: error,
-      status: 'running',
-      timestamp: new Date(),
-    };
-
-    this.tasks.set(task.id, task);
-
-    try {
-      let prompt = `Debug and fix this error:\n${error}`;
-      if (context) {
-        prompt += `\n\nContext:\n${context}`;
-      }
-
-      const response = await this.gemini.prompt(prompt);
-      task.result = response.text;
-      task.status = 'completed';
-    } catch (error) {
-      task.status = 'failed';
-      task.error = error instanceof Error ? error.message : 'Unknown error';
-    }
-
-    this.addToHistory(task);
-    return task;
+  enhanceCode(code: string, enhancement: string): Promise<StudioTask> {
+    return this.run(
+      'enhance',
+      enhancement,
+      `Enhance the following code with: ${enhancement}\n\nCode:\n${code}`,
+      { context: { originalCode: code } }
+    );
   }
 
-  async generateDocumentation(code: string): Promise<StudioTask> {
-    const task: StudioTask = {
-      id: `task_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-      type: 'document',
-      description: 'Generate documentation',
-      status: 'running',
-      timestamp: new Date(),
-    };
+  debugIssue(issue: string, context?: string): Promise<StudioTask> {
+    const prompt = context
+      ? `Debug and fix this error:\n${issue}\n\nContext:\n${context}`
+      : `Debug and fix this error:\n${issue}`;
+    return this.run('debug', issue, prompt, { context: context ? { context } : undefined });
+  }
 
-    this.tasks.set(task.id, task);
-
-    try {
-      const response = await this.gemini.prompt(
-        `Generate comprehensive documentation for this code:\n\n${code}\n\nInclude:\n- Purpose\n- Parameters\n- Return values\n- Usage examples\n- Edge cases`
-      );
-      task.result = response.text;
-      task.status = 'completed';
-    } catch (error) {
-      task.status = 'failed';
-      task.error = error instanceof Error ? error.message : 'Unknown error';
-    }
-
-    this.addToHistory(task);
-    return task;
+  generateDocumentation(code: string): Promise<StudioTask> {
+    return this.run(
+      'document',
+      'Generate documentation',
+      `Generate documentation for this code. Include purpose, parameters, return values, usage examples, and edge cases:\n\n${code}`
+    );
   }
 
   getTask(id: string): StudioTask | undefined {
@@ -176,25 +119,26 @@ Follow shadcn/ui component patterns when applicable.`;
   }
 
   getHistory(limit?: number): StudioTask[] {
-    const historyLimit = limit || this.config.maxHistory || 50;
-    return this.history.slice(-historyLimit);
+    return this.history.slice(-(limit ?? this.config.maxHistory ?? 50));
   }
 
   clearHistory(): void {
     this.history = [];
     this.tasks.clear();
+    this.gemini.clearHistory();
   }
 
   private addToHistory(task: StudioTask): void {
     this.history.push(task);
-    if (this.history.length > (this.config.maxHistory || 50)) {
+    const cap = this.config.maxHistory ?? 50;
+    if (this.history.length > cap) {
       this.history.shift();
     }
   }
 
   getStatus(): Record<string, unknown> {
     return {
-      activeTasks: Array.from(this.tasks.values()).filter((t) => t.status === 'running').length,
+      activeTasks: [...this.tasks.values()].filter((t) => t.status === 'running').length,
       totalTasks: this.tasks.size,
       historySize: this.history.length,
       timestamp: new Date(),

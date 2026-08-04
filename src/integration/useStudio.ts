@@ -3,141 +3,73 @@
  * Simple interface for AI Studio orchestration within React components
  */
 
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useState } from 'react';
 import StudioOrchestrator, { type StudioConfig, type StudioTask } from './studio-orchestrator';
 
 export function useStudio(config: StudioConfig) {
-  const orchestratorRef = useRef<StudioOrchestrator | null>(null);
-  const [isReady, setIsReady] = useState(false);
+  // Lazy initializer runs exactly once — no setState during render.
+  const [orchestrator] = useState(() => new StudioOrchestrator(config));
   const [tasks, setTasks] = useState<StudioTask[]>([]);
-  const [error, setError] = useState<string | null>(null);
   const [currentTask, setCurrentTask] = useState<StudioTask | null>(null);
+  const [isRunning, setIsRunning] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  // Initialize orchestrator
-  if (!orchestratorRef.current) {
-    orchestratorRef.current = new StudioOrchestrator(config);
-    setIsReady(true);
-  }
-
-  const generateComponent = useCallback(
-    async (description: string, imageUrl?: string) => {
-      if (!orchestratorRef.current) {
-        setError('Orchestrator not initialized');
-        return;
-      }
-
-      try {
-        setError(null);
-        const task = await orchestratorRef.current.generateComponent(description, imageUrl);
-        setCurrentTask(task);
-        setTasks((prev) => [...prev, task]);
-        return task;
-      } catch (err) {
-        const errorMessage = err instanceof Error ? err.message : 'Unknown error';
-        setError(errorMessage);
-        throw err;
-      }
-    },
-    []
-  );
-
-  const analyzeCode = useCallback(async (code: string) => {
-    if (!orchestratorRef.current) {
-      setError('Orchestrator not initialized');
-      return;
-    }
-
+  /** Every action shares one lifecycle: clear error, run, record, surface failure. */
+  const track = useCallback(async (work: () => Promise<StudioTask>): Promise<StudioTask> => {
+    setError(null);
+    setIsRunning(true);
     try {
-      setError(null);
-      const task = await orchestratorRef.current.analyzeCode(code);
+      const task = await work();
       setCurrentTask(task);
       setTasks((prev) => [...prev, task]);
+      if (task.status === 'failed' && task.error) {
+        setError(task.error);
+      }
       return task;
-    } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : 'Unknown error';
-      setError(errorMessage);
-      throw err;
+    } finally {
+      setIsRunning(false);
     }
   }, []);
 
-  const enhanceCode = useCallback(
-    async (code: string, enhancement: string) => {
-      if (!orchestratorRef.current) {
-        setError('Orchestrator not initialized');
-        return;
-      }
+  const generateComponent = useCallback(
+    (description: string, image?: string) =>
+      track(() => orchestrator.generateComponent(description, image)),
+    [orchestrator, track]
+  );
 
-      try {
-        setError(null);
-        const task = await orchestratorRef.current.enhanceCode(code, enhancement);
-        setCurrentTask(task);
-        setTasks((prev) => [...prev, task]);
-        return task;
-      } catch (err) {
-        const errorMessage = err instanceof Error ? err.message : 'Unknown error';
-        setError(errorMessage);
-        throw err;
-      }
-    },
-    []
+  const analyzeCode = useCallback(
+    (code: string) => track(() => orchestrator.analyzeCode(code)),
+    [orchestrator, track]
+  );
+
+  const enhanceCode = useCallback(
+    (code: string, enhancement: string) =>
+      track(() => orchestrator.enhanceCode(code, enhancement)),
+    [orchestrator, track]
   );
 
   const debugIssue = useCallback(
-    async (error: string, context?: string) => {
-      if (!orchestratorRef.current) {
-        setError('Orchestrator not initialized');
-        return;
-      }
-
-      try {
-        setError(null);
-        const task = await orchestratorRef.current.debugIssue(error, context);
-        setCurrentTask(task);
-        setTasks((prev) => [...prev, task]);
-        return task;
-      } catch (err) {
-        const errorMessage = err instanceof Error ? err.message : 'Unknown error';
-        setError(errorMessage);
-        throw err;
-      }
-    },
-    []
+    (issue: string, context?: string) => track(() => orchestrator.debugIssue(issue, context)),
+    [orchestrator, track]
   );
 
-  const generateDocumentation = useCallback(async (code: string) => {
-    if (!orchestratorRef.current) {
-      setError('Orchestrator not initialized');
-      return;
-    }
-
-    try {
-      setError(null);
-      const task = await orchestratorRef.current.generateDocumentation(code);
-      setCurrentTask(task);
-      setTasks((prev) => [...prev, task]);
-      return task;
-    } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : 'Unknown error';
-      setError(errorMessage);
-      throw err;
-    }
-  }, []);
+  const generateDocumentation = useCallback(
+    (code: string) => track(() => orchestrator.generateDocumentation(code)),
+    [orchestrator, track]
+  );
 
   const clearHistory = useCallback(() => {
-    if (orchestratorRef.current) {
-      orchestratorRef.current.clearHistory();
-      setTasks([]);
-      setCurrentTask(null);
-    }
-  }, []);
+    orchestrator.clearHistory();
+    setTasks([]);
+    setCurrentTask(null);
+    setError(null);
+  }, [orchestrator]);
 
-  const getStatus = useCallback(() => {
-    if (!orchestratorRef.current) return null;
-    return orchestratorRef.current.getStatus();
-  }, []);
+  const getStatus = useCallback(() => orchestrator.getStatus(), [orchestrator]);
 
   return {
-    isReady,
+    isReady: true,
+    isRunning,
     tasks,
     currentTask,
     error,
@@ -148,7 +80,7 @@ export function useStudio(config: StudioConfig) {
     generateDocumentation,
     clearHistory,
     getStatus,
-    orchestrator: orchestratorRef.current,
+    orchestrator,
   };
 }
 
